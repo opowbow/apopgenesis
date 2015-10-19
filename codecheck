@@ -1,0 +1,397 @@
+# //***************************************************************************
+# //
+# // Purpose:   Translates HCT exit codes and reports to radia SQL reporting
+#*******************************************************************  
+# Global Variables  
+#*******************************************************************  
+$Script:Version      = '1.0.5'  
+$Script:LogSeparator = '**********************************************************************************'  
+$Script:LogFile = ("C:\Program Files (x86)\HPOV\Radia\Log\HCT-Wrapper.log")
+$Script:appRootPath = ("D:\HealthCheckTools") 
+$Script:scriptName = $myInvocation.Mycommand.Name
+[string]$Script:BuidIden = 'AG_UAD_WIN7_BL_'
+[int]$Script:VLength = 8
+# get current Script Execution locaiton
+$source = $MyInvocation.MyCommand
+
+#*******************************************************************  
+# Functions  
+#*******************************************************************  
+
+Function Write-Log()
+{  
+#       
+#      .DESCRIPTION  
+#          Creates a log entry with time stamp
+#    
+
+Param(
+	 
+	  [string]$Msg,
+      [string]$type,
+      [string]$EvntID
+      ) #end param
+
+       $date = Get-Date -format dd.MM.yyyy  
+       $time = Get-Date -format HH:mm:ss  
+       Add-Content -Path $LogFile -Value ($date + " " + $time + "   " + $Msg)   
+       Write-EventLog -LogName Application -Source $source -EntryType $type -EventId $EvntID -Message $Msg
+}  
+
+Function GetBuildGroup() {
+
+#      .DESCRIPTION  
+#          Returns the Build Version of the UAD by querrying Master Build Group assigned to the computer 
+
+    Try
+    {
+
+       $dName = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain().Name
+       if ($dName -ne $null) 
+        {
+            [string]$domainName = $dName.ToLower()
+            Write-Log -Msg "Domain Name is: $domainName" -type Info -EvntID 2
+        }
+        else
+        {
+            $domainName = 'diif'
+            Write-Log -Msg "Unable to determine the domain Name, setting default instead" -type Error -EvntID 400
+        }
+
+        [int]$bLen=$Script:BuidIden.Length # Get current length of target group
+      
+        Add-Type -AssemblyName System.DirectoryServices.AccountManagement
+       
+        $ct = New-Object System.DirectoryServices.AccountManagement.PrincipalContext([System.DirectoryServices.AccountManagement.ContextType]::Domain, $domainName)
+        $account = [System.DirectoryServices.AccountManagement.Principal]::FindByIdentity($ct,[System.DirectoryServices.AccountManagement.IdentityType]::Name,$env:COMPUTERNAME)
+
+        $BuildGroup = $account.GetGroups() | Where-Object {($_.SamAccountName -match $Script:BuidIden) -and ($_.SamAccountName.ToLower() -notmatch 'laptopdelta')} | Select-Object SamAccountName
+
+        If($BuildGroup -ne $null)
+        {
+           foreach($gp in $BuildGroup)
+           {
+              
+               [string]$Build = $gp.SamAccountName.ToString()
+               [int]$bldLen = $Build.length
+              
+                if($bldLen -lt 24)
+                {
+                    [string]$BuildVersion = $Build.Substring($bLen,$Script:VLength)  
+                                  
+                    return $BuildVersion
+                }      
+           } 
+           #Error group not matching
+           Write-Log -Msg "FAILURE: Master Build Group Name not as expected" -type Error -EvntID 100
+           return $false
+        }
+        Else
+        {
+            Write-Log -Msg "FAILURE: Unable to determine the Master Build Group" -type Error -EvntID 110
+            return $false         
+        }
+
+    }
+    catch [System.Management.Automation.RuntimeException]
+    {
+        Write-Log -Msg "FAILURE: Master Build Group Name was NULL - unexpected error $_.Exception.Message" -type Error -EvntID 100
+        return $false
+    }
+}
+
+
+Function GetRegistryString($hive, $regKey, $regValue)
+{
+#  
+#      .DESCRIPTION  
+#          Returns registry key value 
+#
+    $aSR = (Get-ItemProperty ($Hive + ":\" + $regKey)).$regValue
+    If ($aSR -eq $null) 
+    {
+        Write-Log -Msg "FAILURE: Unable to read the HCT Source Root path from the register. Exiting" -type Error -EvntID 100
+        return $false
+    }
+    Else 
+    {
+        Write-Log -Msg "INFORMATION: The HCT Source Root has been determined to be $aSR" -type Info -EvntID 21
+        return $aSR
+    }
+} #End Function
+
+Function WriteEvent($eventCategory, $eventType, $eventID, $eventMessage) 
+{  
+#      .DESCRIPTION  
+#          Write Event to specified event log 
+#
+    [Diagnostics.EventLog]::WriteEntry($eventCategory, $eventMessage, $eventType, $eventID)
+} #End Function
+
+function Set-Results ([string]$result,[int] $ExitCode,[string] $Description)
+{
+
+	try {
+	
+			[datetime] $CurrentTime = Get-Date -format s
+
+		    Write-Log -Msg "Result: $result  with exitcode $Exitcode" -type Info -EvntID 2
+		    		    
+			Set-ItemProperty -path "HKLM:\Software\HCT\Applications\" -Name "Status" -Value $result -force
+			Set-ItemProperty -path "HKLM:\Software\HCT\Applications\" -Name "Description" -Value $Description -force
+			Set-ItemProperty -path "HKLM:\Software\HCT\Applications\" -Name "ExitCode" -Value $ExitCode -force
+			Set-ItemProperty -path "HKLM:\Software\HCT\Applications\" -Name "DateRun" -Value $CurrentTime -force	
+		
+		}
+	Catch {
+	}
+	
+}
+
+Function Test-ASR($asr)
+{
+# Test Connection to Radia Server to find HCT updates
+    $connectionMade = $false
+
+Try{
+    Write-Log -Msg "INFORMATION: Checking the Application Source Root $HCTSourceRoot is available" -type Info -EvntID 3
+    #Test First Server
+        If ((test-path $asr) -ne $true)
+        {
+            Write-Log -Msg "INFORMATION: Could not connect to the application source root  $asr Waiting for 5 seconds before retrying" -type Warning -EvntID 4
+            Start-Sleep -Seconds 5
+  
+            Do 
+            {
+
+                If ($asr -match "PRI")
+                {
+                    $asr = $asr.replace("PRI","SEC")
+                }
+                ElseIf ($asr -match "SEC")
+                {
+                     $asr = $asr.replace("SEC","TER")
+                }
+                ElseIf ($asr -match "TER")
+                {
+                    Write-Log -Msg "FAILURE: Attempt to connect to the tertiary application source root $asr has failed. Aborting update process" -type Error -EvntID 101
+                    return $false
+                }
+                Else
+                {
+                    Write-Log -Msg "FAILURE: Connection to any application source root failed. Aborting update process" -type Error -EvntID 102
+                    return $false
+                }
+
+                #Test updated path
+                If ((test-path $asr) -ne $true)
+                {
+    
+                    Write-Log -Msg "INFORMATION: Attempt to connect to the application source root $asr has failed. Attempting to connect to the nextserver" -type Info -EvntID 7
+                }
+                Else 
+                {
+                    $connectionMade = $true
+                    Write-Log -Msg "INFORMATION: Connected to the application source root  $asr successfully." -type Info -EvntID 8
+                    return $asr
+                }   
+
+            } While ($connectionMade -ne $True)
+
+        }
+        Else
+        { 
+            Write-Log -Msg "INFORMATION: Connected to the application source root  $asr successfully." -type Info -EvntID 9
+            return $asr
+        }
+    }
+       
+catch 
+{
+    return $false
+}
+}
+
+Function CopyLatestFiles ()
+{
+#  
+#      .DESCRIPTION  
+#          Searched the Application Source Root for the latest version of the application
+#
+Param(
+	 
+	  [string]$path,
+      [string]$build
+	) #end param
+
+try
+{
+    #Test the ASR can be accessed. Otherwise Exit
+   
+         If ((test-path $path) -eq $true) 
+        {
+            #Build the Root Path for the Application Source
+            $HCTRootPath = ($path + "\_HCTScripts\"+ $build)
+            $HCTCheck = ($HCTRootPath  + "\Requests\*")
+            $HCTCount= (Get-ChildItem $HCTCheck -File |Where {$_.GetType() -match "fileInfo"} |measure-object).count
+            
+            If (((test-path $HCTCheck) -eq $True) -and ($HCTCount -gt 3))
+            { 
+                Remove-Item D:\HealthCheckTools\Requests\* -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item D:\HealthCheckTools\Scripts\* -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item D:\HealthCheckTools\Responses\* -Recurse -Force -ErrorAction SilentlyContinue
+            
+                $HCTcopy = $HCTRootPath + "\*"
+
+                Copy-Item $HCTcopy D:\HealthCheckTools -Recurse -Force 
+                return $True 
+                
+            }
+            Else 
+            {     
+               Write-Log -Msg "Warning: Unable to copy updated HCT files as HCTScripts folder does not exist." -type Error -EvntID 104
+               return $false 
+            }
+        }
+    
+        Else 
+        {     
+           Write-Log -Msg "FAILURE: Unable to locate or copy updated HCT files from AppV Share. Aborting." -type Error -EvntID 105
+           return $false 
+        }
+   }
+   catch 
+   {
+	  	return $false
+    }
+
+} #End Function
+
+
+
+#*******************************************************************  
+#  Main Code 
+#*******************************************************************  
+
+try {
+		new-eventlog -LogName Application -Source HCT-SCAN -ErrorAction SilentlyContinue
+	
+        # Check to see if Finalise has Previously Run - HCT within build is a runonce app
+        [string] $RunStatus = (Get-ItemProperty -Path 'HKLM:\Software\HCT\Applications\'-ErrorAction SilentlyContinue).'Status'
+        if ($RunStatus.ToLower() -eq "pass") 
+        {
+            Write-Log -msg " Build Finlised already processes... Exiting" -type Info -EvntID 2 
+            $ExitCode = 500
+            Exit $ExitCode
+        }
+
+
+        #Get current build version
+        Write-Log -Msg "INFORMATION: Attempting to determine UAD Master Build Group" -type Info -EvntID 1
+        $HCTBuildVer= (GetBuildGroup)
+                
+        if($HCTBuildVer -eq $false)   #  if Master Build Group Version cannot be detected then exit with a 709.
+        {
+            Write-Log -Msg "FAILURE: Unable to read determin the Master Build Group. Stopping HCT with 709" -type Error -EvntID 107
+	    	$ExitCode = 709
+            Exit $ExitCode
+        }
+        
+        	
+        Write-Log -Msg "INFORMATION: Attempting to read registry and establish the Application Source Root" -type Info -EvntID 2
+        $HCTSourceRoot = (GetRegistryString -hive HKLM -regKey Software\WOW6432Node\Microsoft\SoftGrid\4.5\Client\Configuration -regValue ApplicationSourceRoot)
+   
+        #Read the current AppV Source Root from the registry
+        $HCTSourceRoot = Test-ASR -asr $HCTSourceRoot 
+        if($HCTSourceRoot -eq $false) 
+        {   
+            Write-Log -Msg "FAILURE: Attempt to connect to any Appv Shares Sources, $asr  has failed. Aborting update process" -type Error -EvntID 109
+	        $ExitCode = 709
+            Exit $ExitCode
+        }
+
+        #if Root is available then look for newer scripts
+                
+        $CopResult = [bool](CopyLatestFiles -path $HCTSourceRoot -build $HCTBuildVer)        
+        if (!$CopResult)
+        {
+            Write-Log -Msg "FAILURE: Attempting to copy HCT scripts locally from Appv Shares Sources. Aborting update process" -type Error -EvntID 110
+            $ExitCode = 709
+            Exit $ExitCode
+        }
+        Write-Log -Msg "INFORMATION: Finished updating HCT tools" -type Info -EvntID 10
+
+
+		Write-Log -Msg "INFORMATION: Launching HealthCheck Tool Scan" -type Info -EvntID 11
+			
+	 	If ((test-path $Script:appRootPath ) -eq $True )  # check healthcheck paths are present
+        {
+            Set-Location $Script:appRootPath    
+			
+			New-Item -Path "HKLM:\Software\" -Name HCT -Force  # create results registry key
+			
+            # Add sleep for 80 seconds to allow all services to start before running tests.
+            Start-Sleep -Seconds 80
+            			
+            $executeHCT = Start-Process -Wait UADhealthCheck.exe -ArgumentList "Silent" -PassThru	# execute healthcheck code
+			
+			$RS = $executeHCT.ExitCode # sets resulting HCT code to variable
+			
+			Switch ($RS) # select action based on exit code
+			{
+				    0 { Set-Results "PASS" $RS "Passed without Errors";	$ExitCode = 0 }
+						  
+        			1 { Set-Results "FAILED" $RS "HCT Falied with a Code Error";	$ExitCode = 321 }
+					
+        			10 { Set-Results "PASS" $RS "Passed with Minor Warnings";	$ExitCode = 0 }
+					
+					300 { Set-Results "PASS" $RS "Passed with Some Errors - investigate as soon as possible";	$ExitCode = 0 }
+					
+					500 { Set-Results "FAILED" $RS "Failed with Some Significant Errors - investigate urgently";	$ExitCode = 321}
+					
+					2000 { Set-Results "FAILED" $RS "Failed with Some Critical Issues - investigate immediately";	$ExitCode = 321}
+        			
+					default {Set-Results "FAILED" $RS "Unexpected Error code";	$ExitCode = 321}
+			
+			}
+		}
+	else
+		{
+			write-host ("failed to find HCT code to execute")
+			Write-Log -Msg "FAILURE: failed to find HCT code to execute" -type Error -EvntID 120
+			$ExitCode = 709
+		}
+		
+	}
+catch {
+     [System.exception] 
+	    write-host $_.Exception.GetType().FullName; 
+		Write-Log -Msg "FAILURE: The HCT failed with an unexpected error $_.Exception.Message" -type Error -EvntID 130
+		write-host $_.Exception.Message
+	   	$ExitCode = 709
+	}
+    
+    Finally {
+
+        if($ExitCode -eq 709)
+        {
+           $ExitCode = 709
+           Write-Log "End of script with Exit code:  $ExitCode" -type Info -EvntID 1000
+           Exit $ExitCode
+        }	
+        	
+        if($ExitCode -eq 500)
+        {
+           Write-Log -Msg "Already Run Previously" -type Info -EvntID 900
+           $ExitCode = 0
+           Exit $ExitCode
+        }	
+
+        Write-Log 'Run Radia DB update using HCT_Reporting.tcl' -type Info -EvntID 990
+		$idmsys = 'C:\Program Files (x86)\HPOV\Radia'
+		$tcl = 'HCT_Reporting.tcl'
+		$kit = 'nvdkit.exe'
+		& "$idmsys\$kit" "$idmsys\$tcl"
+		Write-Log "End of script with Exit code:  $ExitCode" -type Info -EvntID 1000
+		Exit $ExitCode
+	}
