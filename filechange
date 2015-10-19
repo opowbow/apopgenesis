@@ -1,0 +1,753 @@
+############################################################################################
+#
+#
+#
+# Version : 1.0 - 08022009 - Initial release
+# Updates : 2.0 - 20/09/2011 - Updated for brand new logic 
+# Updates : 3.0 - 06/02/2012 - Updated radsched logic
+#
+  set version "LOGCONN v3.00"
+#
+#           
+#           
+#
+############################################################################################
+
+proc doirun { preface } {
+
+# check network
+
+# get trigram 
+	if { [ file exists $preface] } {
+		set obj [nvdobj #auto -mode r -lazy 1 -file $preface]
+		set trigram [$obj get 0 TRIGRAM]
+		$obj close
+		set chkstring "pri-$trigram-radrcs"
+		set wtd [chkping $chkstring ]
+		if { $wtd != "0" } {
+			syslog info "No network for $chkstring"
+			set chkstring "sec-$trigram-radrcs"
+			set wtd [chkping $chkstring ]
+			if { $wtd != "0" } {
+				syslog info "No network for $chkstring"
+				set chkstring "ter-$trigram-radrcs"
+				set wtd [chkping $chkstring ]
+					if { $wtd != "0" } {
+						syslog info "No network for $chkstring"
+						set chkstring "radrcs"
+						set wtd [chkping $chkstring ]
+							if { $wtd != "0" } {
+								syslog info "No network found - check LAN connections"
+								syslog info "Exiting mop-Up engine"
+								exit
+							} else {
+								syslog info "Found network for $chkstring"
+							}
+				
+					} else {
+						syslog info "Found network for $chkstring"
+					}
+
+
+			} else {
+				syslog info "Found network for $chkstring"
+			}
+				
+
+		} else {
+			syslog info "Found network for $chkstring"
+		}
+
+	} else {
+		syslog info "No preface object - just check radrcs"
+		set chkstring "radrcs"
+		syslog info "Checking network availability "
+		set wtd [ chkping $chkstring ]
+		if { $wtd != "0" } {
+			syslog info "No network found - check LAN connections"
+			syslog info "Exiting mop-Up engine"
+			exit
+		} else {
+			Syslog info "Found network for $chkstring"
+		}
+	}
+
+}
+
+proc chkping { server }  {
+	syslog info "Checking $server "
+	set status [catch { eval exec "ping -n 1 -w 2000 $server" } msg ]
+		if {![regexp "TTL" $msg ]} {
+			return 1
+			
+		} else {
+			return 0
+		}
+
+
+}
+
+
+proc movefiles { src dest }  {
+
+	eval file copy -force [glob $src/*] $dest 
+	if { ![catch {glob -directory $src *.*} logfiles] } {
+       		 foreach f [lsort -dictionary $logfiles] {
+			catch { eval file delete -force  $f }				
+		}
+	}
+}
+
+
+proc lasttime { contype conobj } {
+
+	#syslog info "$contype and $conobj"
+	#syslog info "Checking last time of $contype connect" 
+	
+	if { [ file exists $conobj ] } {
+		set CurrTime [ clock format [ clock scan now ] -format %s ]
+		set LastConn [ clock format [ file mtime $conobj ] -format %s ]
+		if {[string match "*ATLCONNF*" $conobj ] }  {
+			syslog info "Object created on [ clock format $LastConn -format {%Y%m%d %H:%M:%S} ]"			
+		}  else  {			
+			syslog info "Last $contype connect was run on [ clock format $LastConn -format {%Y%m%d %H:%M:%S} ]"	
+		}	
+
+		set 24hrs [ expr 60 * 60 * 24 ]
+		set 4hrs [ expr 60 * 60 * 4 ]
+		set 3days [ expr 60 * 60 * 24 * 3 ]
+		set 7days [ expr 60 * 60 * 24 * 7 ]
+		# time in seconds since last connect
+
+		set SecSinceConn [ expr $CurrTime - $LastConn ]
+ 		syslog info "SecSinceConn $SecSinceConn"
+ 		syslog info "3days $3days"
+		syslog info "24hrs $24hrs"
+		
+		
+		if { $SecSinceConn < $24hrs } {
+		
+			if {[string match "*ATLCONNF*" $conobj ] }  {
+				syslog info "Last radia mop-up full connect has not exceeded 24 hours"			
+			}  else  {			
+				syslog info "$contype connect has taken place within the last 24 hours"
+			}	
+					
+			
+			# check failed connect and match with the return code	
+				
+			
+			return 0
+
+
+		} elseif { $SecSinceConn > $3days } {	
+			#*** changed to 3 days		
+			
+			# Last $contype connect was more than 7 days ago, initiating full connect
+			syslog info "Last radia mop-up full connect has exceeded 3 days"
+			if { $contype == "PATCH" } {
+				# running PATCH connect
+				return 3
+			} else {
+				# running Full connect connect
+				return 1
+			}
+			
+
+		} else {
+			syslog info "Last radia mop-up full connect less than 3 days ago"
+			return 0
+
+		}
+
+
+		
+
+	} else {
+		
+		#syslog info "$conobj not found"
+		#syslog info "No $contype connect has taken place ever !, running connect"
+		return 1
+ 		
+	}
+
+return
+}
+
+proc connect { constr } {
+	# syslog info "Launching command $constr"
+	catch [ eval exec $constr & ]
+	
+}
+
+proc Install_connect { reason } {
+	global softconinst patchcon zatlconni
+	syslog info "Running a connect $reason"
+	connect $softconinst 
+	catch {file delete $zatlconni}
+	mkobj "INSTALL" "ATLCONNI.EDM"
+	mkobj $patchcon "ATLPATCH.EDM"
+	mkobj $softconinst "ATLHOLD.EDM"
+}
+
+
+proc Full_connect { reason } {
+	global softconfull patchcon zatlconnf
+	syslog info "Running a connect $reason"
+	connect $softconfull 
+	catch {file delete $zatlconnf}
+	mkobj "FULL" "ATLCONNF.EDM"
+	mkobj $patchcon "ATLPATCH.EDM"
+	mkobj $softconfull "ATLHOLD.EDM"
+}
+
+
+
+proc mkobj { constring object } {
+
+set obj [nvdobj #auto -mode rw -lazy 1 -file [file join $::NVDROOT $object] ]
+syslog info "Creating object $object"
+$obj insert 0 CMDLINE $constring
+$obj commit
+delete object $obj
+}
+
+proc chkprocess { process} {
+	set wmi [::tcom::ref getobject "winmgmts:{impersonationLevel=impersonate}!//"]
+
+	set procs [$wmi ExecQuery "select * from win32_process where caption = '$process'" ]
+	set pid 0
+    	::tcom::foreach obj $procs { 
+        set procSet [ $obj Properties_ ] 
+        set pid  "[ [ $procSet Item  ProcessId ] Value ]"
+    }
+    # return pid - 0 means it's finished...
+
+    return $pid	
+}
+
+proc chkntservice { arch } {
+
+syslog info "Procesing radia scheduler service"
+set regkey HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\services\\radsched
+
+# set mode [registry get -wowmode 32 $regkey Start] 
+#set mode [registry get -wowmode $arch $regkey Start] 
+
+	#if { $mode ne "3"} {
+		# mode is not manual, need to sort this
+		catch {service stop radsched}
+		#registry set -wowmode $arch $regkey Start 3 dword	
+		#syslog info "Radia scheduler service is set to auto: change to manual"
+		
+	#} else {
+		#syslog info "Radia scheduler service is set to manual"
+	#}
+
+}
+
+proc chkobject { object } { 
+
+set objpath [ file join $::NVDROOT $object ]
+	if { [ file exists $objpath ]} {
+		set obj [nvdobj #auto -mode r -lazy 1 -file $objpath ]
+		set cline [$obj get 0 CMDLINE]
+		$obj close			
+		return $cline
+	} else {
+		return 0
+	}
+return
+}
+
+
+
+###########################################################################
+#
+# Main Program....keep it simple for possible additions 
+#
+###########################################################################
+# 
+nvd::init  
+package require registry 1.1
+package ifneeded tcom 3.9 [ list load tcom.dll ]
+package require tcom
+
+# set vars
+set rootpath $::NVDSYS
+set libpath $::NVDROOT
+set storepath [ file join $::NVDSYS "store"]
+set atlconnfpath [ file join $::NVDROOT "ATLCONNF.EDM"]
+set atlconnipath [ file join $::NVDROOT "ATLCONNI.EDM"]
+set softpath [ file join $::NVDROOT "SYSTEM\\Radia\\Software\\CONNECT.EDM"]
+set patchpath [ file join $::NVDROOT "SYSTEM\\Radia\\Patch\\CONNECT.EDM"]
+set synoppath [ file join $::NVDROOT "SYNOPSIS.EDM"]
+set softconinst "radntfyc.exe localhost radskman log=atlinstall_connect.log,hreboot=y,ver=n,cop=y"
+#*** changed full connect
+set softconfull "radntfyc.exe localhost radskman log=atl_connect.log,hreboot=y,ver=n,cop=y"
+set patchcon "radntfyc.exe localhost radskman dname=patch,log=atlpatch_connect.log,ask=y,hreboot=y,cop=y"
+set buildpatchcon "radntfyc.exe localhost radskman dname=patch,stage=OSBUILD,log=atlpatch_connect.log,ask=y,hreboot=y,cop=y"
+set ztimeq [file join $libpath "ZTIMEQ.EDM"]
+set zatlconni [file join $libpath "ATLCONNI.EDM"]
+set zatlconnf [file join $libpath "ATLCONNF.EDM"]
+set zatlpatch [file join $libpath "ATLPATCH.EDM"]
+set zpreface [file join $libpath "PREFACE.EDM"]
+set wtd 0
+set failcon 0
+
+######
+# Process logging
+#####
+
+set argA [lindex $argv 0]
+set argB [lindex $argv 1]
+
+
+set file atlconn.log
+set fileren atlconn_1.log
+
+if { [ file exist $storepath/$file] && [ file size $storepath/$file] > 64000} {
+	file rename -force $storepath/$file $storepath/$fileren
+}
+
+catch { file mkdir $storepath }
+
+
+log.init -file $storepath/$file -stderr 0 -mode a
+
+# move older logs
+
+movefiles  $::NVDLOG $storepath 
+
+
+if { $argA == "exbexit"} {
+	syslog info "** Appending log file from exbexit **"
+} else {
+	syslog info ""
+	syslog info "**************** Begin ****************"
+}
+
+# Check retry limit..
+
+if { $argB == "exceeded"} {
+	syslog info "Input parameters: exbexit exceeded "
+	syslog info "Exceeded retry limit, check network and server logs for failed client connects"
+	syslog info "Exiting mop-up engine"
+	exit
+}
+
+set isretry [chkobject "ATLRETRY.EDM"]
+	if { $isretry != "0" } {
+		#retry object there , need to wait
+		syslog info "Pending retry connect..."
+	 	sleep 300
+	} 	
+
+######
+# Checking for calling parameters, radskman and time
+#####	
+
+# process args
+# Check current radskman
+# do extra processing for different args and time
+
+
+
+set wts "0"
+
+if { [chkprocess radskman.exe] > 0} {
+
+	syslog info "Radskman is running, checking source"
+	while { [chkprocess radskman.exe] } {
+      
+      		if { $argA == "exbexit"} {
+      	 		# Radskman is running from Exbexit, wait for it to finish
+			
+	 		set wts "1"
+      		} else {
+      			syslog info "Radskman is running from another source"
+      			
+			catch {file delete $ztimeq}
+			syslog info "Exiting mop-up engine"
+			exit
+      		}
+	}
+
+
+} else {
+
+	syslog info "No current radia connect running"
+	set argc [llength $argA]
+	if {$argc != 1} {
+		syslog info "Input parameters: None "
+	} else {
+		syslog info "Input parameters: $argA "
+	}
+
+	switch -exact -- $argA {
+
+		"reboot" 	{
+
+			# *** NEW live defect section for patch connect after reboot , regardless of time
+			# BEGIN...
+			# first check if in build phase , if so run a reboot - LIVe defect # ?
+
+			set obj [nvdobj #auto -mode r -lazy 1 -file $::NVDROOT/PREFACE.EDM ]
+			set buildline [$obj get 0 CMDLINE]
+			$obj close	
+			set bcmd [ regexp -nocase "stage=osbuild" $buildline ]
+			# check build connect first
+			if { $bcmd != "0" } {
+				#syslog info "Last connect was a build connect"	
+				#syslog info "Check was it a patch connect"
+				# check was it a build (here ) patch 
+				set bpatchcmd [ regexp -nocase "dname=patch" $buildline ]	
+				if { $bpatchcmd != "0" } {				
+					syslog info "Last connect was a build patch connect, continue"	
+
+				}  else {
+
+					syslog info "System requires a build patch connect"	
+					connect $buildpatchcon
+					syslog info "Exiting mop-up engine"
+					exit
+				}
+			
+			} else {
+
+				syslog info "Last connect was not a build connect"
+			}
+					
+			
+
+			set CurrChkTime [ clock format [ clock scan now ] -format %H:%M ]		
+
+			if { $CurrChkTime >= "06:31" } {
+				syslog info "Current time is outside software management maintenance window of 23:59 - 06:31"				
+				syslog info "Continue default processing with 'reboot' argument"
+				
+			} else {
+				syslog info "Current time is inside software management maintenance window of 00:00 - 06:30 "
+				#**** remember - this is now install connect !!
+				Full_connect "From maintenance window startup"
+				syslog info "Exiting mop-up engine"
+				exit
+			}
+		}	
+
+		"checkin" 	{
+
+			# process an arma startup if during the night
+			set CurrChkTime [ clock format [ clock scan now ] -format %H:%M ]		
+
+			if { $CurrChkTime >= "04:01" } {
+				syslog info "Current time means running normal daily checkin tasks "				
+				syslog info "Continue default processing with 'checkin' argument"
+				
+			} else {
+				syslog info "Current time is inside arma reboot time of 00:00 - 04:01 "
+				# restart arma and exit
+				set argA "maint_checkin"
+				syslog info "Running in maint_checkin mode"				
+			}
+		}	
+
+		# END...
+
+		"arnefull" 	{
+			# ignore current connects
+			catch {file delete $::NVDROOT/ATLHOLD.EDM}
+			Full_connect "From arne full"
+			syslog info "Exiting mop-up engine"
+			exit
+		}
+
+		"arneinstall" 	{
+			# ignore current connects
+			catch {file delete $::NVDROOT/ATLHOLD.EDM}
+			Install_connect "From arne install"
+			syslog info "Exiting mop-up engine"
+			exit
+		}
+	} 
+	
+}
+
+
+######
+# Check network
+#####
+
+
+doirun $zpreface
+
+
+#####
+# Check radsched , and we will turn this on when we are ready
+#####
+
+# get architecture from zconfig to pass to command
+set obj [nvdobj #auto -mode r -lazy 1 -file $::NVDROOT/ZCONFIG.EDM ]
+set architect [string toupper [$obj get 0 ZHDWARCH] ]
+$obj close
+
+
+if { $architect == "X86" } { 
+	set arcmode "32" 
+} else {
+	set arcmode "64" 
+}
+
+syslog info "Current architecture is $architect, mode is $arcmode -bit"
+
+chkntservice $arcmode
+catch {service stop radsched}
+
+# delete timers
+
+catch {file delete $ztimeq}
+
+
+#####
+# Now check if there are exiting objects and process accordingly
+#####
+
+
+#####
+# IS there a holding object?
+#####
+
+set ishold [chkobject "ATLHOLD.EDM"]
+syslog info "Checking radia connect holding object : ATLHOLD"
+
+if { $ishold != "0" } {
+	syslog info "Found holding object, check parameters"
+		if { $argA == "checkin"} {
+			# arma initiated command with checkin			
+			syslog info "Machine has a Pending reboot "				
+			# delete timer in case it is corrupt		
+			catch {file delete $ztimeq}
+			syslog info "Exiting mop-up engine"
+			exit
+					
+		} elseif { $argA == "maint_checkin"} {			
+			# arma initiated command with reboot
+			set obj [nvdobj #auto -mode r -lazy 1 -file $::NVDROOT/ATLHOLD.EDM ]
+			set cmdline [$obj get 0 CMDLINE]
+			$obj close			
+			syslog info "Continue with pending radia client connect"
+			connect $cmdline
+			# check to see if current holding connect is a patch - if yes do not create atlpatch again
+			set lpc [ regexp -nocase "dname=patch" $cmdline  ] 
+				if { $lpc != "0" } {
+					syslog info "No pending patch connects"
+					catch {file delete $zatlpatch}
+					mkobj "PATCH" "ATLRUNP.EDM"
+					
+				} else {	
+					syslog info "Setting up a pending patch connect object"		
+					# delete if one is there
+					catch {file delete $zatlpatch}
+					mkobj $patchcon "ATLPATCH.EDM"
+				} 
+			syslog info "Exiting mop-up engine"
+			exit			
+			
+		} else {
+			syslog info "No relevant parameters passed to holding object"
+
+		}		
+
+} else { 
+	
+	syslog info "No holding object found, check arguments"
+
+	# Check time..if in window - do a new connect
+	if { $argA == "maint_checkin"} {	 
+		syslog info "Running Connect during overnight window "				
+		Install_connect "From last radia connect times"
+		syslog info "Exiting mop-up engine"
+		exit
+				
+	} else {
+		#syslog info "Current time is running outside maintenance window "
+		# restart arma and exit
+						
+	}
+
+}
+
+#####
+# IS there a retry object?
+#####
+
+set isretry [chkobject "ATLRETRY.EDM"]
+
+syslog info "Checking radia connect retry object : ATLRETRY"
+
+if { $isretry != "0" } {
+	syslog info "Found retry object, checking retry parameters"				
+
+	set obj [nvdobj #auto -mode r -lazy 1 -file $::NVDROOT/ATLRETRY.EDM ]
+	set cmdline [$obj get 0 CMDLINE]
+	set counter [$obj get 0 RTRYCNTR]
+	set retryrc [$obj get 0 LASTRC]
+	$obj close	
+	syslog info "Last connect return code was: $retryrc"	
+	syslog info "Retry last connect: Attempt ($counter) out of (3)"
+	connect $cmdline
+	mkobj $cmdline "ATLHOLD.EDM"
+	# check to see if current retry connect is a patch - if yes do not create atlpatch again
+	set lpc [ regexp -nocase "dname=patch" $cmdline  ] 
+		if { $lpc != "0" } {
+			syslog info "No pending patch connects"
+			catch {file delete $zatlpatch}			
+		} else {	
+			syslog info "Setting up a pending patch connect object"
+			# delete if one is there
+			catch {file delete $zatlpatch}
+			mkobj $patchcon "ATLPATCH.EDM"
+			
+		} 
+	syslog info "Exiting mop-up engine"
+	exit					
+} else { 
+	syslog info "No retry object found, continue"
+}
+
+
+#####
+# IS there a patch object?
+#####
+
+syslog info "Checking radia patch connect object : ATLPATCH"
+
+set ispatch [chkobject "ATLPATCH.EDM"]
+
+if { $ispatch != "0" } {
+	syslog info "Found patch object ATLPATCH.EDM, run patch connect"
+	# catch { service start radsched }				
+	connect $patchcon
+	mkobj "PATCH" "ATLRUNP.EDM"
+	mkobj $patchcon "ATLHOLD.EDM"
+	# now delete atlpatch
+	catch {file delete $zatlpatch}
+	syslog info "Exiting mop-up engine"
+	exit					
+} else { 
+	syslog info "No patch object found, continue"
+}
+
+
+
+#####
+# No pending objects, Now finally checking the lasttime connect, output is either 0,1,2,3  this decides action per connection
+#####
+
+set issynop [chkobject "SYNOPSIS.EDM"]
+
+
+# Do atlconn objects.....wtdatl = what to do atlwise full connect ??!!
+
+# do not do on first run
+
+syslog info "Checking radia full connect object : ATLCONNF" 
+
+
+
+if { [ file exist $atlconnfpath ] }  {
+	#syslog info "Found full connect object, check creation parameters "
+	set wtdatl [ lasttime "Radia mop-Up full" $atlconnfpath ]
+	syslog info "return from time check is : $wtdatl "
+
+	if { $wtdatl =="1" } {  # no brainer, last atl full connect more than 7 days ago..
+		#Full_connect "From exceeded full connect 7 day limit"
+		#*** changed to install connect, in connect string
+		Full_connect "From exceeded 3 day limit"
+
+		syslog info "Exiting mop-up engine"
+		exit 
+
+	#} elseif { $wtdatl =="0" } {  # atlconnf created less than 24 hours ago..need to check softare connect
+	#	#syslog info "Radia mop-Up full connect was created on, check software connect"
+	#	#exit 	
+	 
+	} else {
+		#*** changed to install connect, in connect string
+		# syslog info "Radia mop-Up full connect was created less than 7 days ago, check software connect"
+		syslog info "Radia mop-Up connect object was created less than 3 days ago"
+	}
+
+} else {
+	syslog info "No full connect object found"
+	mkobj "FULL" "ATLCONNF.EDM"
+	# this purely sets day 1 for the 7 days do a full connect; regardless of whats in software connect object..
+	set wtdatl "2" 
+	
+}
+
+
+# time will be today
+
+# exit as connect was run witin 24 hours , last atl full connect more than 7 days ago..
+
+# if { $wtdatl =="2" } {  syslog info "Radia mop-Up full connect was run less than 7 days ago, check software connect"} 
+# exit as connect was run witin 24 hours , last atl full connect more than 7 days ago..
+
+# Do software now .....wtd = what to do ??!!
+
+#syslog info "Checking radia software connect object : CONNECT" 
+
+#set wtd [ lasttime "SOFTWARE" $softpath ]
+
+
+#if { $wtd =="1" } {  # no brainer
+#	syslog info "Not run a software connect in 7 days or more"
+#	# Full_connect "From 7 days limit"
+#	# changed to install connect	
+#	Full_connect "From 7 days limit"	
+#	syslog info "Exiting mop-up engine"
+#	exit 
+#} 
+
+#***  removed this.....
+
+#if { $wtd =="2" } { 
+#	syslog info "Last connect was a roaming connect, check last mop-up connect times"	
+#	Install_connect "From less than 7 days"
+#
+#} 
+
+#if { $wtd =="0" } { 
+#	# last 24hrs - make sure its not roaming?
+#	syslog info "Check connect type "
+#	if { $issynop != "0" } {
+#		#syslog info "Found SYSNOPSIS object, check last string"	
+#		set obj [nvdobj #auto -mode r -lazy 1 -file $synoppath ]
+#		set cmdline [$obj get 0 CMDLINE]
+#		$obj close			
+#		syslog info "Last command ran was: $cmdline"
+#		
+#		set wlcr [ regexp -nocase "atlroaming=y" $cmdline  ]
+#		if { $wlcr != "0" } {
+#			syslog info "Last connect was a roaming connect, check last mop-up connect times"	
+#			Install_connect "From last radia connect times"
+#			
+#		}
+#	syslog info "Exiting mop-up engine"
+#	exit 					
+#	} else { 
+#		syslog info "No SYNOPSIS.EDM, run install connect"
+#		Install_connect "From no synopsis"
+#		syslog info "Exiting mop-up engine"
+#		exit 
+#	}
+#} 
+
+# put scheduler back to started, but leave on manual
+
+catch {service start radsched}
+
+syslog info "Exiting mop-up engine"
+
+#syslog info "**************** End ****************"
